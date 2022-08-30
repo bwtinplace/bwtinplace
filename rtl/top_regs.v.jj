@@ -1,0 +1,281 @@
+`default_nettype none
+
+/*
+ * HW description:
+ *  - scan chain of 8-bit registers to hold full block
+ *  - comparators every 8-bit regs: `lte`, `lt`, `eq`
+ *  - encoder to find MARKER position
+ *  - two decoders to create variable range masks
+ *  - one decoder to read current char
+ *  - one encoder to write current char
+ *  - counter for comparison results (`lte` and `lt`)
+ *  - two adders
+ *
+ * OP description:
+ *  - cycle 1: load cur char and find the MARKER index
+ *  - cycle 2: count the `lte` regs in two words
+ *  - cycle 3: count the `lt` regs in two words, sum previous `lte` words
+ *  - cycle 4: sum previous `lt` words
+ *  - cycle 5: shift the regs to left
+ *  - cycle 6: scan next char in and shift to right
+ *  - repeat.
+ *
+ *  NOTES:
+ *  - min three chars req to start processing
+ *  - use wrapper with queue when integrating
+ */
+
+module top #(parameter N_SZ   = {{n_sz}},
+             parameter N_LOG2 = {{n_log2}},
+             parameter MARKER = 36) // '$' == 'd36
+  (
+    input  wire clk,
+    input  wire rst_n,
+    input  wire ch_in_valid,
+    input  wire [7:0] ch_in,
+    output wire [7:0] ch_out,
+    output reg  ch_out_valid
+);
+
+integer i;
+
+// scan chain of 8-bit registers
+reg  [7:0]        T [N_SZ-1:0];
+wire [N_LOG2-1:0] sht_str_pos;
+
+// range decoder
+wire [N_LOG2-1:0] rng_dec_beg;
+wire [N_LOG2-1:0] rng_dec_end;
+reg [N_SZ-1:0]   rng_dec_01;
+reg [N_SZ-1:0]   rng_dec_10;
+reg [N_SZ-1:0]   rng_dec;
+
+// marker encoder
+reg  [N_LOG2-1:0] mrk_enc;
+
+// comparators: lt, lte, eq
+reg  [N_SZ-1:0] cmp_lt;
+reg  [N_SZ-1:0] cmp_lte;
+reg  [N_SZ-1:0] cmp_eq;
+wire [7:0] cmp_eq_to;
+
+// counter
+reg  [N_LOG2-1+1:0] cnter0;
+reg  [N_LOG2-1+1:0] cnter1;
+wire [N_SZ-1:0]   cnter_add;
+
+// control logic
+reg [N_LOG2-1+1:0] p;
+reg [N_LOG2-1+1:0] r0;
+reg [N_LOG2-1+1:0] r1;
+reg [N_LOG2-1+1:0] r;
+reg [N_LOG2-1+1:0] x;
+reg [7:0]        c;
+reg [7:0] state;
+reg cmp_lt_en;
+reg cmp_lte_en;
+reg sht_left_en;
+reg store_en;
+reg full;
+
+// control logic
+always @(posedge clk or negedge rst_n) begin
+  if (!rst_n) begin
+    cmp_lt_en  <= 0;
+    cmp_lte_en <= 0;
+    sht_left_en <= 0;
+    store_en   <= 0;
+    p <= 0; r0 <= 0; r1<= 0; r <= 0; c <= 0; x <= 0;
+    state <= 0;
+  end else begin
+    case (state)
+      // scan in chars (min 3 chars to proceed)
+      8'd0, 8'd1, 8'd2: begin
+        cmp_lt_en  <= 0;
+        cmp_lte_en <= 0;
+        sht_left_en <= 0;
+        store_en   <= 0;
+        p <= 0; r0 <= 0; r1<= 0; r <= 0; c <= 0;
+        if (ch_in_valid) begin
+          x <= x + 1'b1;
+          state <= state + 1'b1;
+        end
+      end
+      // load cur char and find marker position
+      8'd3: begin
+        c <= T[0];
+        p <= mrk_enc;
+        cmp_lte_en <= 1;
+        cmp_lt_en  <= 0;
+        state <= state + 1'b1;
+      end
+      // count lte from 1 until p-1
+      8'd4: begin
+        r0 <= cnter0;
+        r1 <= cnter1;
+        cmp_lte_en <= 0;
+        cmp_lt_en  <= 1;
+        state <= state + 1'b1;
+      end
+      // count lte from 1 until p-1
+      8'd5: begin
+        r0 <= cnter0;
+        r1 <= cnter1;
+        r <= r0 + r1;
+        cmp_lte_en <= 0;
+        cmp_lt_en  <= 0;
+        store_en   <= 1;
+        state <= state + 1'b1;
+      end
+      // count lt from p to x-1 and store current char at p
+      8'd6: begin
+        r <= r + r0 + r1;
+        cmp_lt_en <= 0;
+        sht_left_en <= 1;
+        state <= state + 1'b1;
+      end
+      // shift the registers left from 0 to r-1, store marker at p
+      8'd7: begin
+        sht_left_en <= 0;
+        store_en    <= 0;
+        state <= state + 1'b1;
+      end
+      // shift the registers right to store new char
+      8'd8: begin
+        if (ch_in_valid) begin
+          if (x == N_SZ) begin
+            x <= 1;
+            state <= 8'd1;
+          end
+          else begin
+            x <= x + 1'b1;
+            state <= 8'd3;
+          end
+        end
+      end
+    endcase
+  end
+end
+
+// shift control logic
+assign sht_str_pos = (sht_left_en) ? r : p;
+
+// scan chain and shift of characters
+always @(posedge clk or negedge rst_n) begin
+  if (!rst_n) begin
+    ch_out_valid <= 0;
+    full <= 0;
+    // synthesis loop_limit 99999999999
+    for (i = 0; i < N_SZ; i = i+1) begin
+      T[i] <= 0;
+    end
+  end else begin
+    ch_out_valid <= 0;
+    full <= full | (x == N_SZ - 1);
+    if (sht_left_en) begin
+      // shift left on step 4 of algorithm
+      // synthesis loop_limit 99999999999
+      for (i = 0; i < N_SZ-1; i = i+1) begin
+        T[i] <= (rng_dec[i]) ? T[i+1] : T[i];
+      end
+      T[N_SZ-1] <= T[N_SZ-1];
+    end else if (ch_in_valid) begin
+      ch_out_valid <= full ? 1 : 0;
+      // shift right on new char
+      T[0] <= ch_in;
+      // synthesis loop_limit 99999999999
+      for (i = 1; i < N_SZ; i = i+1) begin
+        T[i] <= T[i-1];
+      end
+    end
+    // store the marker or current character
+    if (store_en) begin
+      T[sht_str_pos] <= (sht_left_en) ? MARKER : c;
+    end
+  end
+end
+
+// output logic (other end of the scan chain)
+assign ch_out = T[N_SZ-1];
+
+// comparators: lt, lte, eq
+always @(*) begin
+  // synthesis loop_limit 99999999999
+  for (i = 0; i < N_SZ; i = i+1) begin
+    cmp_lt[i]  = (T[i] <  c) ? 1'b1 : 1'b0;
+    cmp_lte[i] = (T[i] <= c) ? 1'b1 : 1'b0;
+    cmp_eq[i]  = (T[i] == MARKER) ? 1'b1 : 1'b0;
+  end
+end
+
+// counter control logic
+assign cnter_add = (cmp_lt_en)  ? cmp_lt  :
+                   (cmp_lte_en) ? cmp_lte :
+                   0;
+
+// counter for comparators: lt, lte
+always @(*) begin
+  cnter0 = 0;
+  // synthesis loop_limit 99999999999
+  for (i = 0; i < N_SZ/2; i = i+1) begin
+    cnter0 = cnter0 + (cnter_add[i] & rng_dec[i]);
+  end
+  cnter1 = 0;
+  // synthesis loop_limit 99999999999
+  for (i = N_SZ/2; i < N_SZ; i = i+1) begin
+    cnter1 = cnter1 + (cnter_add[i] & rng_dec[i]);
+  end
+end
+
+// range control logic
+assign rng_dec_beg = (cmp_lte_en)  ? 1'b1 :
+                     (cmp_lt_en)   ? p    :
+                     (sht_left_en) ? 0    :
+                      0;
+
+assign rng_dec_end = (cmp_lte_en)  ? p - 1'b1                 :
+                     (cmp_lt_en)   ? x - 1'b1                 :
+                     (sht_left_en) ? ((r > 0) ? r - 1'b1 : 0) :
+                     0;
+
+// range decoders
+always @(*) begin
+  // synthesis loop_limit 99999999999
+  for (i = 0; i < N_SZ; i = i+1) begin
+    rng_dec_01[i] = (i < rng_dec_beg) ? 1'b0 : 1'b1;
+    rng_dec_10[i] = (i > rng_dec_end) ? 1'b0 : 1'b1;
+  end
+  rng_dec = rng_dec_01 & rng_dec_10;
+end
+
+// marker comparison/pos encoder
+always @(*) begin
+
+  /*
+   * The commented out code below is incorrectly inferred as priority encoder,
+   * degrading timing results of the synthesized design.
+   *
+   * mrk_enc = 0;
+   * for (i = 0; i < N_SZ; i = i+1) begin 
+   *   if (cmp_eq[i]) mrk_enc = i;
+   * end
+   */
+
+  mrk_enc = 0;
+{% if synth=="xilinx" %}
+  (* parallel_case *) casez (cmp_eq)
+  {% for i in range(n_sz) %}
+    { { ({{n_sz-i-1}}) {1'h?} }, 1'b1, { ({{i}}) {1'b?} } }: mrk_enc = {{i}};
+  {%- endfor %}
+  endcase
+{% else %}
+  case (1'b1) // {{synth}} parallel_case
+  {% for i in range(n_sz) %}
+    cmp_eq[{{i}}]: mrk_enc = {{i}};
+  {%- endfor %}
+  endcase
+{% endif %}
+end
+
+endmodule
+

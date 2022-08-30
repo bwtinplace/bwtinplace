@@ -1,0 +1,4 @@
+# Append `-gui` to the `run_regs_sim` call to open waveforms.
+
+mkdir -p work && cd work && source ../run_regs_sim ; cd ..
+

@@ -1,0 +1,10 @@
+xrun \
+    -access +rwc \
+    -timescale 1ns/10ps \
+    -define RTL \
+    -incdir ../../rtl \
+    ../../rtl/top_regs.v \
+    ../tb_regs.sv \
+    -errormax 1 \
+    -top tb \
+    $*

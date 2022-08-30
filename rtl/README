@@ -1,0 +1,1 @@
+python3 ../scripts/jinja.py --jj='arch="regs";n_sz=128;n_log2=7;synth="synopsys"' top_regs.v.jj
