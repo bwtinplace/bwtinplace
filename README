@@ -1,4 +1,5 @@
 Source code associated with paper:
 
 	Kleber Stangherlin, Andrew Kennings, ``Hardware Architecture for
-	Inplace Compute of Burrows-Wheeler Transform in Fixed Time", 2022.
+	Inplace Compute of Burrows-Wheeler Transform in a Single Iteration",
+	2022.
